@@ -19,36 +19,37 @@ POSTGRES_PASSWORD = 'postgres'
 
 # Define file paths for your CSV data
 # Adjust the path if your data folder is in a different location
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 CUSTOMERS_CSV = os.path.join(BASE_DIR, 'data', 'crm', 'customers.csv')
 ORDERS_CSV = os.path.join(BASE_DIR, 'data', 'transactions', 'orders.csv')
 CAMPAIGNS_CSV = os.path.join(BASE_DIR, 'data', 'marketing', 'campaigns.csv')
 
 def load_csv_to_postgres(table_name, csv_file):
     """
-    Simple function to copy a CSV file into a Postgres table using psycopg2.
+    Enhanced function to copy a CSV file into a Postgres table using psycopg2.
     """
-    conn = psycopg2.connect(
-        host=POSTGRES_HOST,
-        port=POSTGRES_PORT,
-        dbname=POSTGRES_DB,
-        user=POSTGRES_USER,
-        password=POSTGRES_PASSWORD
-    )
-    cursor = conn.cursor()
+    try:
+        with psycopg2.connect(
+            host=POSTGRES_HOST,
+            port=POSTGRES_PORT,
+            dbname=POSTGRES_DB,
+            user=POSTGRES_USER,
+            password=POSTGRES_PASSWORD
+        ) as conn:
+            with conn.cursor() as cursor:
+                # Truncate with CASCADE
+                truncate_query = f"TRUNCATE {table_name} RESTART IDENTITY CASCADE;"
+                cursor.execute(truncate_query)
 
-    # Truncate the table first (optional), so we load fresh each time
-    truncate_query = f"TRUNCATE {table_name} RESTART IDENTITY;"
-    cursor.execute(truncate_query)
-
-    # Copy the CSV contents into the table
-    with open(csv_file, 'r') as f:
-        next(f)  # skip header
-        cursor.copy_expert(f"COPY {table_name} FROM STDIN CSV", f)
-
-    conn.commit()
-    cursor.close()
-    conn.close()
+                # Copy the CSV contents into the table
+                with open(csv_file, 'r') as f:
+                    next(f)  # skip header
+                    cursor.copy_expert(f"COPY {table_name} FROM STDIN CSV", f)
+                
+                conn.commit()
+    except Exception as e:
+        print(f"Error processing {table_name}: {str(e)}")
+        raise
 
 def ingest_customers():
     load_csv_to_postgres('customers', CUSTOMERS_CSV)
