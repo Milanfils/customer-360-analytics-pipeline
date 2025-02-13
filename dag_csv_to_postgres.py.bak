@@ -2,66 +2,15 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.operators.postgres import PostgresOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
+from airflow.models import Variable
 from airflow.utils.task_group import TaskGroup
 from datetime import datetime, timedelta
-from contextlib import contextmanager
 import logging
 import os
-import time
-import random
+import sys
 
 # Set up logging
 logger = logging.getLogger(__name__)
-
-class PostgresTransactionHook(PostgresHook):
-    """Extended PostgresHook with better transaction management."""
-    
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.isolation_level = "SERIALIZABLE"
-        self.max_retries = 5
-        self.initial_backoff = 1
-        self.max_backoff = 30
-        self.schema = kwargs.get('schema', 'public')
-        
-    @contextmanager
-    def transaction_with_retry(self):
-        retry_count = 0
-        backoff = self.initial_backoff
-        
-        while True:
-            try:
-                conn = self.get_conn()
-                conn.set_isolation_level(self.isolation_level)
-                cursor = conn.cursor()
-                
-                try:
-                    yield cursor
-                    conn.commit()
-                    break
-                except Exception as e:
-                    conn.rollback()
-                    if "deadlock detected" in str(e).lower() and retry_count < self.max_retries:
-                        retry_count += 1
-                        logger.warning(f"Deadlock detected (attempt {retry_count}/{self.max_retries}). Retrying in {backoff} seconds...")
-                        time.sleep(backoff)
-                        backoff = min(backoff * 2 + random.uniform(0, 1), self.max_backoff)
-                        continue
-                    raise
-                finally:
-                    cursor.close()
-            except Exception as e:
-                if retry_count >= self.max_retries:
-                    logger.error(f"Max retries ({self.max_retries}) exceeded. Last error: {str(e)}")
-                    raise
-            finally:
-                if 'conn' in locals():
-                    conn.close()
-
-    def acquire_table_lock(self, cursor, table_name):
-        """Acquire an exclusive lock on the table."""
-        logger.info(f"Acquiring exclusive lock on table {table_name}")
-        cursor.execute(f"LOCK TABLE {self.schema}.{table_name} IN EXCLUSIVE MODE")
 
 # Default DAG arguments with proper error handling and retries
 default_args = {
@@ -77,7 +26,6 @@ default_args = {
 
 # Constants and configurations
 DATA_PATH = '/opt/data/raw'
-SQL_SCRIPTS_PATH = '/opt/airflow/scripts/sql'
 FILE_PATHS = {
     'dim_date': os.path.join(DATA_PATH, 'dim_date.csv'),
     'customers': os.path.join(DATA_PATH, 'customers.csv'),
@@ -88,9 +36,6 @@ FILE_PATHS = {
 }
 
 POSTGRES_CONN_ID = 'postgres_customer360'
-MAX_TASK_RETRIES = 3
-TASK_RETRY_DELAY = timedelta(minutes=5)
-TASK_TIMEOUT = timedelta(hours=1)
 
 def load_csv_to_postgres(table_name: str, csv_file: str) -> None:
     """
@@ -104,12 +49,6 @@ def load_csv_to_postgres(table_name: str, csv_file: str) -> None:
         FileNotFoundError: If CSV file doesn't exist
         Exception: For any database operation errors
     """
-    task_instance = context.get('task_instance')
-    task_id = context.get('task').task_id
-    execution_date = context.get('execution_date')
-    
-    logger.info(f"Starting data load for table: {table_name} at {execution_date}")
-    logger.info(f"Task ID: {task_id}, Attempt: {task_instance.try_number}")
     logger.info(f"Starting data load for table: {table_name}")
     
     if not os.path.exists(csv_file):
@@ -118,45 +57,68 @@ def load_csv_to_postgres(table_name: str, csv_file: str) -> None:
         raise FileNotFoundError(error_msg)
     
     try:
-        pg_hook = PostgresTransactionHook(postgres_conn_id=POSTGRES_CONN_ID)
+        pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        conn = pg_hook.get_conn()
+        cursor = conn.cursor()
         
-        with pg_hook.transaction_with_retry() as cursor:
-            # Acquire table lock
-            pg_hook.acquire_table_lock(cursor, table_name)
-            
-            # Truncate existing data
-            logger.info(f"Truncating table: {table_name}")
-            truncate_query = f"TRUNCATE {table_name} RESTART IDENTITY CASCADE;"
-            cursor.execute(truncate_query)
-            
-            # Load new data
-            logger.info(f"Loading data from {csv_file}")
-            with open(csv_file, 'r') as f:
-                next(f)  # skip header
-                cursor.copy_expert(f"COPY {table_name} FROM STDIN CSV", f)
-            
-            # Verify row count
-            cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-            row_count = cursor.fetchone()[0]
-            logger.info(f"Loaded {row_count} rows into {table_name}")
+        # Truncate existing data
+        logger.info(f"Truncating table: {table_name}")
+        truncate_query = f"TRUNCATE {table_name} RESTART IDENTITY CASCADE;"
+        cursor.execute(truncate_query)
+        
+        # Load new data
+        logger.info(f"Loading data from {csv_file}")
+        with open(csv_file, 'r') as f:
+            next(f)  # skip header
+            cursor.copy_expert(f"COPY {table_name} FROM STDIN CSV", f)
+        
+        # Verify row count
+        cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+        row_count = cursor.fetchone()[0]
+        logger.info(f"Loaded {row_count} rows into {table_name}")
+        
+        conn.commit()
         
     except Exception as e:
         error_msg = f"Error processing {table_name}: {str(e)}"
         logger.error(error_msg)
         raise Exception(error_msg)
+        
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+        if 'conn' in locals():
+            conn.close()
             
     logger.info(f"Completed data load for table: {table_name}")
 
+def ingest_dim_date():
+    load_csv_to_postgres('dim_date', DIM_DATE_CSV)
+
+def ingest_customers():
+    load_csv_to_postgres('customers', CUSTOMERS_CSV)
+
+def ingest_orders():
+    load_csv_to_postgres('orders', ORDERS_CSV)
+
+def ingest_campaigns():
+    load_csv_to_postgres('campaigns', CAMPAIGNS_CSV)
+
+def ingest_campaign_costs():
+    load_csv_to_postgres('campaign_costs', CAMPAIGN_COSTS_CSV)
+
+def ingest_product_costs():
+    load_csv_to_postgres('product_costs', PRODUCT_COSTS_CSV)
 # Define the DAG
+# DAG definition
 with DAG(
-    dag_id='customer_360_pipeline',
+    dag_id='customer360_analytics_pipeline',
     default_args=default_args,
     description='Load and transform customer 360 analytics data',
-    schedule_interval='0 6 * * *',  # Run at 6 AM daily
+    schedule_interval='@daily',
     catchup=False,
-    tags=['customer360', 'analytics', 'etl'],
-    max_active_runs=1,
-    dagrun_timeout=timedelta(hours=3)  # Add timeout for entire DAG run
+    tags=['customer360', 'analytics'],
+    max_active_runs=1
 ) as dag:
 
     # Group 1: Reference Data Loading
@@ -164,13 +126,7 @@ with DAG(
         task_ingest_dim_date = PythonOperator(
             task_id='load_dim_date',
             python_callable=lambda: load_csv_to_postgres('dim_date', FILE_PATHS['dim_date']),
-            retries=MAX_TASK_RETRIES,
-            retry_delay=TASK_RETRY_DELAY,
-            execution_timeout=TASK_TIMEOUT,
-            doc_md="""
-            Loads date dimension data from CSV to PostgreSQL.
-            Handles date-related reference data for analytics.
-            """,
+            retries=3,
         )
 
     # Group 2: Customer Data Loading
@@ -211,17 +167,14 @@ with DAG(
 
     # Group 5: Transformations
     with TaskGroup("transform_data") as transform_group:
-        # Read SQL file content
-        with open(os.path.join(SQL_SCRIPTS_PATH, 'transformations.sql'), 'r') as file:
-            sql_content = file.read()
-        
+        # Load and validate transformations
+        # Load and validate transformations
         run_transformations = PostgresOperator(
             task_id='run_transformations',
             postgres_conn_id=POSTGRES_CONN_ID,
-            sql=sql_content,
+            sql='/opt/airflow/scripts/sql/transformations.sql',
             autocommit=True,
             retries=3,
         )
-
     # Set up dependencies
     ref_data_group >> customer_data_group >> [marketing_data_group, product_data_group] >> transform_group
