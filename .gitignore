@@ -178,3 +178,5 @@ cython_debug/
 # Local docker compose
 docker-compose.override.yml
 .env
+logs/
+*.bak
