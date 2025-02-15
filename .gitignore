@@ -180,3 +180,9 @@ docker-compose.override.yml
 .env
 logs/
 *.bak
+
+# Tableau files
+.~*.twbr
+
+# Backup files
+*.bak
