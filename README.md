@@ -10,6 +10,7 @@ This project implements a data pipeline that:
 - Analyzes product costs and profitability
 - Generates customer lifetime value metrics
 - Creates analytical views for business intelligence
+- Visualizes insights through Tableau dashboards
 
 ## System Requirements
 
@@ -33,12 +34,11 @@ This project implements a data pipeline that:
 ├── dags/
 │   └── dag_csv_to_postgres.py    # Main Airflow DAG
 ├── scripts/
-│   ├── sql/
-│   │   ├── init.sql             # Database initialization
-│   │   └── transformations.sql   # Data transformations
-│   └── python/
-│       └── generate_sample_data.py  # Sample data generation
-├── docker-compose.yaml    # Docker services configuration
+│   └── sql/
+│       ├── init.sql             # Database initialization
+│       └── transformations.sql   # Data transformations
+├── dashboards/              # Tableau dashboard files
+├── docker-compose.yaml      # Docker services configuration
 └── README.md
 ```
 
@@ -74,9 +74,31 @@ docker exec customer-360-analytics-pipeline-airflow-webserver-1 airflow connecti
 
 ## Data Schema
 
-### Base Tables
+The PostgreSQL database 'customer360' contains 9 tables in the public schema:
 
-1. **customers**
+### Fact Tables
+1. **orders**
+- order_id (PK)
+- customer_id (FK)
+- order_date
+- amount
+- product_category
+
+2. **campaign_costs**
+- campaign_id (FK)
+- date
+- cost
+- impressions
+- clicks
+
+3. **product_costs**
+- product_category (PK)
+- cost_date
+- unit_cost
+- supplier
+
+### Dimension Tables
+4. **customers**
 - customer_id (PK)
 - first_name
 - last_name
@@ -84,33 +106,13 @@ docker exec customer-360-analytics-pipeline-airflow-webserver-1 airflow connecti
 - signup_date
 - region
 
-2. **orders**
-- order_id (PK)
-- customer_id (FK)
-- order_date
-- amount
-- product_category
-
-3. **campaigns**
+5. **campaigns**
 - campaign_id (PK)
 - name
 - start_date
 - end_date
 - channel
 - target_audience
-
-4. **campaign_costs**
-- campaign_id (FK)
-- date
-- cost
-- impressions
-- clicks
-
-5. **product_costs**
-- product_category (PK)
-- cost_date
-- unit_cost
-- supplier
 
 6. **dim_date**
 - date_id (PK)
@@ -122,25 +124,22 @@ docker exec customer-360-analytics-pipeline-airflow-webserver-1 airflow connecti
 - day_of_week
 - is_weekend
 
-### Transformed Views
+### Analytical Views
+7. **customer_lifetime_value**
+8. **campaign_performance**
+9. **product_profitability**
 
-1. **customer_lifetime_value**
-- Aggregates customer purchase history
-- Calculates average order value
-- Determines purchase frequency
-- Estimates customer lifetime value
+## Dashboard
 
-2. **campaign_performance**
-- Measures campaign ROI
-- Tracks conversion rates
-- Analyzes cost per acquisition
-- Segments by channel effectiveness
+The Customer 360 Analytics dashboard is available on Tableau Public:
+[Customer 360 Dashboard](https://public.tableau.com/views/Customer360Dashboard_17396532555990/Customer360Dashboard?:language=en-US&:sid=&:redirect=auth&:display_count=n&:origin=viz_share_link)
 
-3. **product_profitability**
-- Calculates margins by product category
-- Tracks cost trends
-- Identifies high and low performers
-
+### Dashboard Features
+- Complete overview of customer analytics
+- Interactive filtering capabilities
+- Real-time data visualization
+- Integration with PostgreSQL data warehouse
+- Daily data refreshes from pipeline
 ## Usage Instructions
 
 1. Ensure all services are running:
