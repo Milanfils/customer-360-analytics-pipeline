@@ -4,21 +4,41 @@ End-to-end analytics pipeline for customer data analysis using Apache Airflow an
 
 ## Overview
 
-This project implements a data pipeline that:
-- Ingests customer transaction and interaction data
-- Processes marketing campaign performance
-- Analyzes product costs and profitability
-- Generates customer lifetime value metrics
-- Creates analytical views for business intelligence
-- Visualizes insights through Tableau dashboards
+This project implements an end-to-end data pipeline that provides a comprehensive 360-degree view of customer behavior and business performance through:
+- Customer transaction and interaction data processing
+- Marketing campaign performance analysis
+- Product cost and profitability tracking
+- Customer lifetime value calculations
+- Business intelligence analytical views
+- Interactive dashboard visualization
+
+## Tech Stack
+
+### Data Processing & Orchestration
+- Apache Airflow 2.7.1 - Workflow orchestration
+- Docker & Docker Compose - Containerization
+
+### Database & Storage
+- PostgreSQL 15 - Data warehouse
+- CSV files - Raw data storage
+
+### Data Visualization
+- Tableau Public - Analytics dashboard
+
+### Programming Languages
+- Python 3.11 - DAG and transformation scripts
+- SQL - Data transformations and analysis
+
+### Development Tools
+- Git - Version control
+- GitHub - Repository hosting
 
 ## System Requirements
 
-- Docker (version 20.10.0 or higher)
-- Docker Compose (version 2.0.0 or higher)
 - 8GB RAM (minimum)
 - 20GB free disk space
-
+- Docker and Docker Compose installed
+- Internet connection for Tableau Public access
 ## Project Structure
 
 ```
