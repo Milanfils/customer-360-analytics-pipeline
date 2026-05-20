@@ -57,22 +57,15 @@ FILLS = {"blue":PatternFill("solid",fgColor="4472C4"),"red":PatternFill("solid",
          "green":PatternFill("solid",fgColor="548235"),"orange":PatternFill("solid",fgColor="ED7D31")}
 
 # =============================================================================
-# HELPERS
+# HELPERS — clean_str only, no data alteration
 # =============================================================================
 def clean_num(s):
     c = s.fillna("").astype(str).str.strip().replace({"-":"0","":"0"})
     return pd.to_numeric(c.str.replace(",","",regex=False).str.replace("$","",regex=False),errors="coerce").fillna(0)
 
 def clean_str(s):
-    return s.fillna("").astype(str).str.strip().str.replace("'","",regex=False).str.replace("\u200b","",regex=False).str.replace("\xa0","",regex=False)
-
-def to_int_str(v):
-    s = str(v).strip().replace("'","").replace("\u200b","").replace("\xa0","")
-    try: return str(int(float(s)))
-    except: return s
-
-def to_int_str_series(s):
-    return pd.to_numeric(s, errors="coerce").fillna(0).astype(int).astype(str).replace("0","")
+    """Strip whitespace and hidden characters only. No numeric conversion, no leading zero removal."""
+    return s.fillna("").astype(str).str.strip().str.replace("\u200b","",regex=False).str.replace("\xa0","",regex=False)
 
 def role_tier(r):
     r = str(r).strip().upper()
@@ -104,8 +97,6 @@ def df_rows(df, cols): return [[row.get(c,"") for c in cols] for _, row in df.it
 # =============================================================================
 def load_and_prepare():
     print("\n" + "="*60 + "\nLOADING & PREPARING DATA\n" + "="*60)
-    global ALL_SPECIAL_CODES
-    ALL_SPECIAL_CODES = [to_int_str(c) for c in ALL_SPECIAL_CODES]
     cust = pd.read_excel(CUSTOMER_FILE, dtype=str)
     rm = pd.read_excel(RM_MASTER_FILE, dtype=str)
     t_data = pd.read_excel(T_DATA_FILE, dtype=str)
@@ -113,7 +104,7 @@ def load_and_prepare():
     for n, d in [("Customer",cust),("RM",rm),("T_Data",t_data),("Branch Lookup",bl)]:
         print(f"  {n:15}: {len(d):,} rows")
 
-    # Clean strings
+    # Clean strings only — no numeric conversion
     for c in [C["ck"],C["cf"],C["cc"],C["ef"],C["bc"],C["po"],C["rk"],C["cs"],C["qb"]]:
         if c in cust.columns: cust[c] = clean_str(cust[c])
     for c in [C["oc"],C["rc"],C["rb"],C["cc2"],C["tf"]]:
@@ -125,37 +116,34 @@ def load_and_prepare():
         t_data[C["tb"]] = t_data[C["tb"]].replace("",np.nan).fillna(t_data[C["tbf"]]).fillna("")
     for c in [C["bcc"],C["bbc"],C["bso"]]:
         bl[c] = clean_str(bl[c])
-    bl[C["bso"]] = bl[C["bso"]].apply(to_int_str)
 
-    # Normalize codes
-    for df, cols in [(cust,[C["bc"],C["po"]]),(rm,[C["oc"],C["cc2"],C["rb"]]),
-                     (t_data,[C["tb"]]),(bl,[C["bcc"],C["bbc"]])]:
-        for c in cols: df[c] = df[c].apply(to_int_str)
-
-    # RM true branch resolution
+    # Build branch lookup maps — keys are raw strings as they appear in the data
     cc2br = dict(zip(bl[C["bcc"]], bl[C["bbc"]]))
     sec2br = dict(zip(bl[C["bso"]], bl[C["bbc"]]))
-    br_set = set(bl[C["bbc"]].unique())
+    valid_br = set(bl[C["bbc"]].unique()) - {""}
 
-    rm_cc = to_int_str_series(rm[C["cc2"]])
-    rm["RM_Branch"] = rm_cc.map(cc2br).fillna("")
+    # RM true branch resolution: cost center -> branch, fallbacks
+    rm["RM_Branch"] = rm[C["cc2"]].map(cc2br).fillna("")
     no = rm["RM_Branch"]==""
-    rm.loc[no,"RM_Branch"] = rm_cc[no].where(rm_cc[no].isin(br_set), "")
+    rm.loc[no,"RM_Branch"] = rm.loc[no, C["cc2"]].where(rm.loc[no, C["cc2"]].isin(valid_br), "")
     no2 = rm["RM_Branch"]==""
-    rm.loc[no2,"RM_Branch"] = rm_cc[no2].map(sec2br).fillna("")
+    rm.loc[no2,"RM_Branch"] = rm.loc[no2, C["cc2"]].map(sec2br).fillna("")
+    # Fallback: try BranchCode directly
+    no3 = rm["RM_Branch"]==""
+    rm.loc[no3,"RM_Branch"] = rm.loc[no3, C["rb"]].where(rm.loc[no3, C["rb"]].isin(valid_br), "")
     print(f"  RM branch resolved: {(rm['RM_Branch']!='').sum()} of {len(rm)}")
 
-    def resolve_br(v):
-        try: v = str(int(float(str(v).strip())))
-        except: return ""
-        if not v or v=="0": return ""
-        for m in [cc2br, {b:b for b in br_set}, sec2br]:
-            if v in m: return m[v]
+    # Customer true branch from T_Data
+    def resolve_br(val):
+        val = str(val).strip()
+        if not val: return ""
+        if val in cc2br: return cc2br[val]
+        if val in valid_br: return val
+        if val in sec2br: return sec2br[val]
         return ""
 
     tb_map = dict(zip(t_data[C["ck"]], t_data[C["tb"]]))
     cust["True_Branch"] = cust[C["ck"]].map(tb_map).fillna("").apply(resolve_br)
-    valid_br = br_set
 
     # Balances
     for c in [C["bd"],C["bl"],C["be"],C["bi"]]: cust[c] = clean_num(cust[c])
@@ -174,7 +162,7 @@ def load_and_prepare():
     cust["RM_BR"] = cust[C["po"]].map(rm_br).fillna("")
     cust["RM_TM"] = cust[C["po"]].map(rm_term).fillna("")
 
-    # Exclusions
+    # Exclusions — compare raw strings, no normalization
     ofc = cust[C["po"]]
     cc_up = cust[C["cc"]].str.upper()
     ef_up = cust[C["ef"]].str.upper()
@@ -183,8 +171,8 @@ def load_and_prepare():
     excl["qb"] = np.where(qb!="", "Has QB Officer", "")
     excl["cl"] = np.where(cc_up.isin(["PERSONAL","COMMERCIAL"]), "", "Non-Eligible Class: "+cc_up)
     excl["em"] = np.where(ef_up.isin(["Y","YES","TRUE","1"]), "Employee", "")
-    excl["ct"] = np.where(ofc==to_int_str(CONTROL_CODE), "Control Code", "")
-    excl["ec"] = np.where(ofc==to_int_str(EMPLOYEE_CODE), "Employee Code", "")
+    excl["ct"] = np.where(ofc==CONTROL_CODE, "Control Code", "")
+    excl["ec"] = np.where(ofc==EMPLOYEE_CODE, "Employee Code", "")
     cust["Excl_Reason"] = excl.apply(lambda r: "; ".join(v for v in r if v), axis=1)
     cust["Is_Excl"] = cust["Excl_Reason"]!=""
 
@@ -250,14 +238,13 @@ def load_and_prepare():
 # =============================================================================
 def build_capacity(rm, valid_br, bl):
     print("\n" + "="*60 + "\nBUILDING CAPACITY MODEL\n" + "="*60)
-    ebr = set(bl[C["bbc"]].fillna("").astype(str).str.strip())
     rmd = rm.drop_duplicates(subset=[C["oc"]], keep="first").copy()
     rmd["RT"] = rmd[C["rc"]].apply(role_tier)
     term = rmd[C["tf"]].fillna("").str.upper()
     br = rmd["RM_Branch"].fillna("").astype(str).str.strip()
 
     staff = rmd[rmd[C["rc"]].isin(STAFFED_ROLES) & (~term.isin(["Y","YES","TRUE","1"])) &
-               (~rmd[C["oc"]].isin(ALL_SPECIAL_CODES)) & (br!="") & (br.isin(ebr))].copy()
+               (~rmd[C["oc"]].isin(ALL_SPECIAL_CODES)) & (br!="") & (br.isin(valid_br))].copy()
 
     cap = {}
     for _, r in staff.iterrows():
@@ -316,7 +303,13 @@ def process(elig, cap, valid_br):
         target = str(row.get("Target","")).strip()
         tm = str(row.get("RM_TM","")).strip()
 
-        target_br = cb if cb and cb!="0" else (tb or "")
+        # Rule 7: target branch — validate current branch against branch lookup
+        if cb and cb in valid_br:
+            target_br = cb
+        elif tb and tb in valid_br:
+            target_br = tb
+        else:
+            target_br = ""
 
         rec = {"CK":str(row.get(C["ck"],"")).strip(), "CN":str(row.get(C["cn"],"")).strip(),
                "CC":str(row.get(C["cc"],"")).strip(), "RK":str(row.get(C["rk"],"")).strip(),
@@ -328,15 +321,26 @@ def process(elig, cap, valid_br):
                "Rec_Ofc":None,"Rec_Name":None,"Rec_RC":None,"Rec_Br":target_br,
                "Move":"Pending","Reason":"","Flag":"","Target":target}
 
-        # No branch
-        if not target_br or (target_br not in valid_br and (not cb or cb=="0")):
-            rec.update(Rec_Ofc="REVIEW",Move="Needs Review",Reason="No branch available",
-                       Flag="No current branch and true branch empty or ineligible")
+        # No valid branch available
+        if not target_br:
+            flag_msg = "Current branch not in branch lookup" if cb else "No current branch"
+            if not tb:
+                flag_msg += " and no true branch"
+            elif tb not in valid_br:
+                flag_msg += f" and true branch {tb} not in branch lookup"
+            rec.update(Rec_Ofc="REVIEW", Move="Needs Review", Reason="No valid branch available",
+                       Flag=flag_msg)
             recs.append(rec); continue
+
+        # Flag if using true branch instead of current
+        if cb and cb not in valid_br:
+            rec["Flag"] = f"Current branch {cb} not in branch lookup; using true branch {target_br}"
+        elif not cb:
+            rec["Flag"] = "No current branch; assigned via true branch"
 
         # Rule 3: Cust Flag null
         if row.get("Need_UA", False):
-            rec.update(Rec_Ofc="Unassigned",Move="Unassignment",Reason="Cust Flag not Y")
+            rec.update(Rec_Ofc="Unassigned", Move="Unassignment", Reason="Cust Flag not Y")
             recs.append(rec); continue
 
         # Check if current assignment valid
@@ -353,8 +357,6 @@ def process(elig, cap, valid_br):
                        Move="No Change", Reason="Already correctly assigned")
             recs.append(rec)
         else:
-            if not cb or cb=="0":
-                rec["Flag"] = "No current branch; assigned via true branch"
             recs.append(rec)
             pending.append(len(recs)-1)
 
@@ -386,8 +388,8 @@ def process(elig, cap, valid_br):
             if flag: rec["Flag"] = (rec["Flag"]+"; "+flag) if rec["Flag"] else flag
             asgn += 1
         else:
-            rec.update(Rec_Ofc="Unassigned",Move="Unassignment",Reason=f"No capacity at {target_br}")
-            if flag: rec["Flag"] = flag
+            rec.update(Rec_Ofc="Unassigned", Move="Unassignment", Reason=f"No capacity at {target_br}")
+            if flag: rec["Flag"] = (rec["Flag"]+"; "+flag) if rec["Flag"] else flag
             unasgn += 1
 
     print(f"  Assigned: {asgn:,}  Unassigned: {unasgn:,}")
