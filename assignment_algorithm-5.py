@@ -18,7 +18,7 @@ VACANCY_CODES = {"00101":"BM1","00102":"BS1","00103":"SSB1","00104":"SSB2",
                  "00105":"SSA1","00106":"SSA2","00107":"SSA3"}
 CONTROL_CODE, EMPLOYEE_CODE = "00001", "14100"
 STAFFED_ROLES = ["BM","BS","SSB","SSA","BM1","BS1","SSB1","SSB2","SSA1","SSA2","SSA3"]
-ALL_SPECIAL_CODES = list(VACANCY_CODES) + [CONTROL_CODE, EMPLOYEE_CODE]
+ALL_SPECIAL_CODES = [CONTROL_CODE, EMPLOYEE_CODE]
 HNW_THRESHOLD = 500000
 CAP = {"Branch Manager":150, "Branch Supervisor":150, "SSB":200, "SSA":125}
 ROLE_CASCADE = {
@@ -422,7 +422,8 @@ def process(elig, cap, valid_br):
     for oc, info in oinfo.items():
         slots = info["cap"] - (rdf["Rec_Ofc"]==oc).sum()
         if slots<=0: continue
-        ua = rdf[(rdf["Rec_Ofc"]=="Unassigned")&(rdf["Rec_Br"]==info["br"])].sort_values("SB",ascending=False)
+        allowed = [t for t, tiers in EXPECTED_TIERS.items() if info["rt"] in tiers]
+        ua = rdf[(rdf["Rec_Ofc"]=="Unassigned")&(rdf["Rec_Br"]==info["br"])&(rdf["Target"].isin(allowed))].sort_values("SB",ascending=False)
         fill_idx = ua.head(slots).index
         if len(fill_idx)==0: continue
         rdf.loc[fill_idx, ["Rec_Ofc","Rec_Name","Rec_RC"]] = [oc, info["on"], info["rc"]]
@@ -443,7 +444,8 @@ def process(elig, cap, valid_br):
             amask = (rdf["Rec_Ofc"]==oc)&(~rdf.index.isin(touched))
             if amask.sum()==0: continue
             low = rdf.loc[amask].sort_values("SB").iloc[0]
-            umask = (rdf["Rec_Ofc"]=="Unassigned")&(rdf["Rec_Br"]==info["br"])&(~rdf.index.isin(touched))
+            allowed = [t for t, tiers in EXPECTED_TIERS.items() if info["rt"] in tiers]
+            umask = (rdf["Rec_Ofc"]=="Unassigned")&(rdf["Rec_Br"]==info["br"])&(~rdf.index.isin(touched))&(rdf["Target"].isin(allowed))
             if umask.sum()==0: continue
             high = rdf.loc[umask].sort_values("SB",ascending=False).iloc[0]
             if high["SB"]>low["SB"]:
