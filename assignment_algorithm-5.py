@@ -238,7 +238,18 @@ def load_and_prepare():
 # =============================================================================
 def build_capacity(rm, valid_br, bl):
     print("\n" + "="*60 + "\nBUILDING CAPACITY MODEL\n" + "="*60)
-    rmd = rm.drop_duplicates(subset=[C["oc"]], keep="first").copy()
+    vacancy_ocs = list(VACANCY_CODES.keys())
+
+    # Regular officers: deduplicate by officer code, use cost-center-resolved branch
+    rm_regular = rm[~rm[C["oc"]].isin(vacancy_ocs)].drop_duplicates(subset=[C["oc"]], keep="first").copy()
+
+    # Vacancy officers: keep all rows, use BranchCode directly, deduplicate per branch
+    rm_vacant = rm[rm[C["oc"]].isin(vacancy_ocs)].copy()
+    rm_vacant["RM_Branch"] = rm_vacant[C["rb"]].where(rm_vacant[C["rb"]].isin(valid_br), "")
+    rm_vacant["_uid"] = rm_vacant[C["oc"]] + "_" + rm_vacant["RM_Branch"]
+    rm_vacant = rm_vacant.drop_duplicates(subset=["_uid"], keep="first")
+
+    rmd = pd.concat([rm_regular, rm_vacant], ignore_index=True)
     rmd["RT"] = rmd[C["rc"]].apply(role_tier)
     term = rmd[C["tf"]].fillna("").str.upper()
     br = rmd["RM_Branch"].fillna("").astype(str).str.strip()
@@ -249,9 +260,13 @@ def build_capacity(rm, valid_br, bl):
     cap = {}
     for _, r in staff.iterrows():
         b, rt = str(r["RM_Branch"]).strip(), r["RT"]
+        oc = str(r[C["oc"]]).strip()
+        # Unique key for vacancy officers to avoid collisions across branches
+        oc_key = f"{oc}_{b}" if oc in vacancy_ocs else oc
         cap.setdefault(b,{}).setdefault(rt,[]).append({
-            "oc":str(r[C["oc"]]).strip(), "on":str(r.get(C["on"],"")).strip(),
-            "rc":str(r[C["rc"]]).strip(), "ac":0})
+            "oc":oc_key, "on":str(r.get(C["on"],"")).strip(),
+            "rc":str(r[C["rc"]]).strip(), "ac":0,
+            "display_oc":oc})  # original code for output display
 
     tot = sum(len(o) for b in cap for o in cap[b].values())
     tc = sum(CAP.get(rt,0)*len(ol) for b in cap for rt,ol in cap[b].items())
@@ -270,9 +285,9 @@ def find_rm(cap, br, primary, fallbacks=None):
         under = [o for o in officers if o["ac"]<limit]
         if under:
             best = min(under, key=lambda x: x["ac"])
-            return best["oc"], best["on"], role, best["rc"], flag
+            return best["oc"], best.get("display_oc",best["oc"]), best["on"], role, best["rc"], flag
         continue
-    return None, None, None, None, f"No capacity at branch {br}"
+    return None, None, None, None, None, f"No capacity at branch {br}"
 
 def incr(cap, br, role, oc):
     for o in cap.get(br,{}).get(role,[]):
@@ -289,7 +304,7 @@ def process(elig, cap, valid_br):
     for br in cap:
         for rt in cap[br]:
             for o in cap[br][rt]:
-                olookup[o["oc"]] = {"br":br,"rt":rt,"rc":o["rc"],"on":o["on"]}
+                olookup[o["oc"]] = {"br":br,"rt":rt,"rc":o["rc"],"on":o["on"],"display_oc":o.get("display_oc",o["oc"])}
 
     all_c = elig.sort_values("SB", ascending=False)
     recs, pending = [], []
@@ -318,7 +333,7 @@ def process(elig, cap, valid_br):
                "Dep":row.get(C["bd"],0), "Loan":row.get(C["bl"],0),
                "Eq":row.get(C["be"],0), "Ins":row.get(C["bi"],0),
                "Cur_Ofc":ofc, "Cur_Br":cb, "True_Br":tb, "Tgt_Br":target_br,
-               "Rec_Ofc":None,"Rec_Name":None,"Rec_RC":None,"Rec_Br":target_br,
+               "Rec_Ofc":None,"Rec_Ofc_Display":None,"Rec_Name":None,"Rec_RC":None,"Rec_Br":target_br,
                "Move":"Pending","Reason":"","Flag":"","Target":target}
 
         # No valid branch available
@@ -330,6 +345,7 @@ def process(elig, cap, valid_br):
                 flag_msg += f" and true branch {tb} not in branch lookup"
             rec.update(Rec_Ofc="REVIEW", Move="Needs Review", Reason="No valid branch available",
                        Flag=flag_msg)
+            rec["Rec_Ofc_Display"] = "REVIEW"
             recs.append(rec); continue
 
         # Flag if using true branch instead of current
@@ -341,6 +357,7 @@ def process(elig, cap, valid_br):
         # Rule 3: Cust Flag null
         if row.get("Need_UA", False):
             rec.update(Rec_Ofc="Unassigned", Move="Unassignment", Reason="Cust Flag not Y")
+            rec["Rec_Ofc_Display"] = "Unassigned"
             recs.append(rec); continue
 
         # Check if current assignment valid
@@ -355,6 +372,7 @@ def process(elig, cap, valid_br):
             incr(cap, info["br"], info["rt"], ofc)
             rec.update(Rec_Ofc=ofc, Rec_Name=info["on"], Rec_RC=info["rc"],
                        Move="No Change", Reason="Already correctly assigned")
+            rec["Rec_Ofc_Display"] = info.get("display_oc", ofc)
             recs.append(rec)
         else:
             recs.append(rec)
@@ -374,11 +392,12 @@ def process(elig, cap, valid_br):
         target = rec["Target"]
         primary, fb = ROLE_CASCADE.get(target, ("SSA",[]))
 
-        oc, on, rt, rc, flag = find_rm(cap, target_br, primary, fb)
-        if oc:
-            incr(cap, target_br, rt, oc)
-            rec["Rec_Ofc"], rec["Rec_Name"], rec["Rec_RC"] = oc, on, rc
-            if oc==rec["Cur_Ofc"] and target_br==rec["Cur_Br"]:
+        oc_key, display_oc, on, rt, rc, flag = find_rm(cap, target_br, primary, fb)
+        if oc_key:
+            incr(cap, target_br, rt, oc_key)
+            rec["Rec_Ofc"], rec["Rec_Name"], rec["Rec_RC"] = oc_key, on, rc
+            rec["Rec_Ofc_Display"] = display_oc
+            if display_oc==rec["Cur_Ofc"] and target_br==rec["Cur_Br"]:
                 rec["Move"], rec["Reason"] = "No Change", "Already correctly assigned"
             elif target_br!=rec["Cur_Br"]:
                 rec["Move"] = "Branch + RM Change"
@@ -389,6 +408,7 @@ def process(elig, cap, valid_br):
             asgn += 1
         else:
             rec.update(Rec_Ofc="Unassigned", Move="Unassignment", Reason=f"No capacity at {target_br}")
+            rec["Rec_Ofc_Display"] = "Unassigned"
             if flag: rec["Flag"] = (rec["Flag"]+"; "+flag) if rec["Flag"] else flag
             unasgn += 1
 
@@ -401,7 +421,8 @@ def process(elig, cap, valid_br):
         for rt in cap[br]:
             lim = CAP.get(rt, 999999)
             for o in cap[br][rt]:
-                oinfo[o["oc"]] = {"br":br,"rt":rt,"rc":o["rc"],"cap":lim,"on":o["on"]}
+                oinfo[o["oc"]] = {"br":br,"rt":rt,"rc":o["rc"],"cap":lim,"on":o["on"],
+                                  "display_oc":o.get("display_oc",o["oc"])}
 
     # Pass 2: Trim & Fill
     print("\n  Pass 2: Trim over-capacity, fill under-capacity...")
@@ -412,6 +433,7 @@ def process(elig, cap, valid_br):
         if excess<=0: continue
         lowest = rdf.loc[mask].sort_values("SB").head(excess).index
         rdf.loc[lowest, ["Rec_Ofc","Rec_Name","Rec_RC"]] = ["Unassigned","",""]
+        rdf.loc[lowest, "Rec_Ofc_Display"] = "Unassigned"
         rdf.loc[lowest, "Move"] = "Unassignment"
         rdf.loc[lowest, "Reason"] = "Trimmed - lowest balance in over-capacity portfolio"
         rdf.loc[lowest, "Flag"] = rdf.loc[lowest,"Flag"].apply(lambda f: (f+"; Pass 2 trim") if f else "Pass 2 trim")
@@ -427,6 +449,7 @@ def process(elig, cap, valid_br):
         fill_idx = ua.head(slots).index
         if len(fill_idx)==0: continue
         rdf.loc[fill_idx, ["Rec_Ofc","Rec_Name","Rec_RC"]] = [oc, info["on"], info["rc"]]
+        rdf.loc[fill_idx, "Rec_Ofc_Display"] = info["display_oc"]
         rdf.loc[fill_idx, "Move"] = "RM Change"
         rdf.loc[fill_idx, "Reason"] = "Filled under-capacity (highest balance)"
         rdf.loc[fill_idx, "Flag"] = rdf.loc[fill_idx,"Flag"].apply(lambda f: (f+"; Pass 2 fill") if f else "Pass 2 fill")
@@ -451,9 +474,11 @@ def process(elig, cap, valid_br):
             if high["SB"]>low["SB"]:
                 li, hi = low.name, high.name
                 rdf.loc[li, ["Rec_Ofc","Rec_Name","Rec_RC"]] = ["Unassigned","",""]
+                rdf.loc[li, "Rec_Ofc_Display"] = "Unassigned"
                 rdf.loc[li, "Move"], rdf.loc[li,"Reason"] = "Unassignment", "Swapped out for higher-balance customer"
                 rdf.loc[li, "Flag"] = (rdf.loc[li,"Flag"]+"; Pass 3 swap out") if rdf.loc[li,"Flag"] else "Pass 3 swap out"
                 rdf.loc[hi, ["Rec_Ofc","Rec_Name","Rec_RC"]] = [oc, info["on"], info["rc"]]
+                rdf.loc[hi, "Rec_Ofc_Display"] = info["display_oc"]
                 rdf.loc[hi, "Move"], rdf.loc[hi,"Reason"] = "RM Change", "Swapped in (higher balance)"
                 rdf.loc[hi, "Flag"] = (rdf.loc[hi,"Flag"]+"; Pass 3 swap in") if rdf.loc[hi,"Flag"] else "Pass 3 swap in"
                 touched.update([li, hi])
@@ -474,7 +499,7 @@ def write_output(rdf, cust, cap):
     # Sheet 1: Recommendations
     ws = wb.active; ws.title = "Recommendations"
     rc = ["CK","CN","CC","RK","RR","Tier","TRV","SB","Loan","Dep","Eq","Ins",
-          "Cur_Ofc","Cur_Br","True_Br","Rec_Ofc","Rec_Name","Rec_RC","Rec_Br","Move","Reason","Flag"]
+          "Cur_Ofc","Cur_Br","True_Br","Rec_Ofc_Display","Rec_Name","Rec_RC","Rec_Br","Move","Reason","Flag"]
     rh = ["Cust Key","Cust Name","Cust Class","Relationship Key","Relationship Role",
           "Balance Tier","Total Relationship Value","Assets","Liabilities","Deposits","Equity","Insurance",
           "Current Officer","Current Branch","True Branch","Recommended Officer","Recommended Officer Name",
@@ -519,7 +544,7 @@ def write_output(rdf, cust, cap):
     ro7 = rdf["Rec_Ofc"].fillna("").astype(str)
     ac = rdf[~ro7.isin(["REVIEW","Unassigned","None",""])].sort_values("SB")
     rc7 = ["CK","CN","CC","Tier","SB","Loan","TRV","Dep","Eq","Ins","Cur_Br","Cur_Ofc",
-           "Rec_Ofc","Rec_Name","Rec_RC","Rec_Br","Reason","Flag"]
+           "Rec_Ofc_Display","Rec_Name","Rec_RC","Rec_Br","Reason","Flag"]
     rh7 = ["Cust Key","Cust Name","Cust Class","Balance Tier","Assets","Liabilities",
            "Total Relationship Value","Deposits","Equity","Insurance","Current Branch","Current Officer",
            "Recommended Officer","Recommended Officer Name","Recommended Role","Recommended Branch","Reason","Flag"]
@@ -553,7 +578,7 @@ def write_output(rdf, cust, cap):
                 cnt = int(m.sum())
                 assets = float(rdf.loc[m,"SB"].sum())
                 loans = float(rdf.loc[m,"Loan"].sum())
-                rps.append({"Br":br,"OC":o["oc"],"ON":o["on"],"Role":rt,"RC":o["rc"],
+                rps.append({"Br":br,"OC":o.get("display_oc",o["oc"]),"ON":o["on"],"Role":rt,"RC":o["rc"],
                             "Cap":lim,"Cnt":cnt,"Open":lim-cnt,"Assets":round(assets,2),"Liabilities":round(loans,2)})
     rpdf = pd.DataFrame(rps)
     write_sheet(wb.create_sheet("RM Portfolio Summary"),
